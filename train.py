@@ -1,20 +1,17 @@
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed import init_process_group, destroy_process_group
 import torch.distributed as dist
-import argparse
 import os
-import torch.multiprocessing as mp
 import torch
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader
 import torch.nn as nn
 import itertools
 import numpy as np
-from torchvision.datasets import ImageFolder
-from .model import Classifier
-from .dataset import CustomDatasetWrapper, ReIDDataset, ImageTransform
-from .config import Config
+from src.model import Classifier
+from src.dataset import ReIDDataset, ImageTransform, InfiniteSampler
+from src.config import Config
 import json
 from tqdm import tqdm
+from torch.amp import autocast
+import json
 
 def text_to_number(text):
     units = {"k": 1000, "m": 1000000, "b": 1000000000}
@@ -23,7 +20,7 @@ def text_to_number(text):
     else:
         return int(text)
     
-def save_final_model(model, optimizer, scheduler, save_dir, cfg):
+def save_final_model(model, optimizer, scheduler, save_dir, cfg, class_to_idx):
     final_dir = os.path.join(save_dir, "final_model")
     os.makedirs(final_dir, exist_ok=True)
 
@@ -31,6 +28,7 @@ def save_final_model(model, optimizer, scheduler, save_dir, cfg):
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
+        'class_to_idx': class_to_idx
     }
 
     final_model_path = os.path.join(final_dir, "final_model.pth")
@@ -41,7 +39,7 @@ def save_final_model(model, optimizer, scheduler, save_dir, cfg):
     with open(config_path, 'w') as f:
         json.dump(cfg, f, indent=4)
     
-def save_checkpoint(model, optimizer, scheduler, epoch, iteration, save_dir, cfg, is_best=False):
+def save_checkpoint(model, optimizer, scheduler, epoch, iteration, save_dir, cfg, class_to_idx, is_best=False):
     # Iteration별로 폴더 생성
     checkpoint_dir = os.path.join(save_dir, f"checkpoint-{iteration}")
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -52,7 +50,8 @@ def save_checkpoint(model, optimizer, scheduler, epoch, iteration, save_dir, cfg
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
         'epoch': epoch,
-        'iteration': iteration
+        'iteration': iteration,
+        'class_to_idx': class_to_idx
     }
 
     # 체크포인트 저장 경로
@@ -96,13 +95,14 @@ def get_scheduler(optimizer, scheduler_type, num_iterations, warmup_ratio):
 
 def train_step(model, data, target, optimizer, criterion):
     optimizer.zero_grad()
-    output = model(data)
-    loss = criterion(output, target)
+    with autocast('cuda'):
+        output = model(data)
+        loss = criterion(output, target)
     loss.backward()
     optimizer.step()
     return loss.item()
 
-def evaluate(model, dataloader, criterion, rank):
+def evaluate(model, dataloader, criterion, device):
     model.eval()  # 평가 모드로 설정
     total_loss = 0.0
     correct = 0
@@ -110,8 +110,8 @@ def evaluate(model, dataloader, criterion, rank):
 
     with torch.no_grad():
         for data, target in dataloader:
-            data = data.to(rank)
-            target = target.to(rank)
+            data = data.to(device)
+            target = target.to(device)
 
             output = model(data)
             loss = criterion(output, target)
@@ -125,51 +125,48 @@ def evaluate(model, dataloader, criterion, rank):
 
     return avg_loss, accuracy
 
-def train(rank, world_size, cfg):
-    global_rank = rank
-    
-    init_process_group(
-        backend='nccl',
-        init_method="evn://",
-        rank=global_rank,
-        world_size=world_size,
-    )
+def train(cfg):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     dataset_cfg = cfg['dataset']
     eval_interval = cfg['eval_step']
     num_iterations = text_to_number(cfg['iterations'])
 
+    total_batch_size = cfg['batch_per_gpu'] * torch.cuda.device_count()
+
     transform = ImageTransform(cfg['resize'], cfg['mean'], cfg['std'])
 
     # Train dataset
-    train_original_dataset = ImageFolder(dataset_cfg['train']['data_root'])
-    train_dataset = ReIDDataset(cfg, train_original_dataset)
-    wrapped_train_dataset = CustomDatasetWrapper(train_dataset, transform=transform, phase='train')
-    train_sampler = DistributedSampler(wrapped_train_dataset, num_replicas=world_size, rank=global_rank, shuffle=True)
-    train_dataloader = DataLoader(wrapped_train_dataset, batch_size=cfg['batch_size'], sampler=train_sampler)
+    train_dataset = ReIDDataset(cfg=dataset_cfg['train'], transform=transform, phase='train')
+    class_to_idx = train_dataset.class_to_idx  # 클래스 정보를 가져옴
+    train_sampler = InfiniteSampler(train_dataset)
+    train_dataloader = DataLoader(train_dataset, batch_size=total_batch_size, sampler=train_sampler, num_workers=8)
 
     # Eval dataset
-    eval_original_dataset = ImageFolder(dataset_cfg['eval']['data_root'])
-    eval_dataset = ReIDDataset(cfg, eval_original_dataset)
-    wrapped_eval_dataset = CustomDatasetWrapper(eval_dataset, transform=transform, phase='val')
-    eval_sampler = DistributedSampler(wrapped_eval_dataset, num_replicas=world_size, rank=global_rank, shuffle=False)
-    eval_dataloader = DataLoader(wrapped_eval_dataset, batch_size=cfg['batch_size'], sampler=eval_sampler)
+    eval_dataset = ReIDDataset(cfg=dataset_cfg['eval'], transform=transform, phase='val')
+    eval_dataloader = DataLoader(eval_dataset, batch_size=total_batch_size, shuffle=False, num_workers=8)
+
+    model = Classifier(num_classes=cfg['num_classes'], backbone=cfg['backbone'], head=cfg['head']).to(device)
     
-    model = Classifier(num_classes=cfg['num_classes'], backbone=cfg['backbone'], head=cfg['head'])
-    model = FSDP(model)
+    if torch.cuda.device_count() > 1:
+        model = nn.DataParallel(model)
+
+    # Set different learning rates for the backbone and head
+    backbone_params = model.module.backbone.parameters() if isinstance(model, nn.DataParallel) else model.backbone.parameters()
+    head_params = model.module.head.parameters() if isinstance(model, nn.DataParallel) else model.head.parameters()
     
-    optimizer = torch.optim.AdamW(model.parameters(), 
-                                  lr=cfg['learning_rate'],
-                                  weight_decay=cfg['weight_decay'],
-                                  betas=(cfg['beta1'], cfg['beta2']),
-                                  eps=cfg['eps']
-                                  )
+    # Optimizer with different learning rates for backbone and classifier
+    optimizer = torch.optim.AdamW([
+        {'params': backbone_params, 'lr': cfg['backbone_lr']},
+        {'params': head_params, 'lr': cfg['head_lr'] }
+    ], weight_decay=cfg['weight_decay'], betas=(cfg['beta1'], cfg['beta2']), eps=cfg['eps'])
+
     
     scheduler = get_scheduler(optimizer, cfg['scheduler_type'], num_iterations, cfg['warmup_ratio'])
     
     criterion = nn.CrossEntropyLoss()
 
-    inifinite_datalodaer = itertools.cycle(train_dataloader)
+    # inifinite_datalodaer = itertools.cycle(train_dataloader)
 
     output_dir = cfg.get('output_dir', './outputs')
     os.makedirs(output_dir, exist_ok=True)
@@ -180,44 +177,30 @@ def train(rank, world_size, cfg):
 
     for iteration in pbar:
         model.train()
-        data, target = next(inifinite_datalodaer)
-        data = data.to(rank)
-        target = target.to(rank)
+        data, target = next(iter(train_dataloader))
+        data = data.to(device)
+        target = target.to(device)
         loss = train_step(model, data, target, optimizer, criterion)
         
-        pbar.set_postfix({'loss': loss, 'learning_rate': scheduler.get_last_lr()[0]})
+        # pbar.set_postfix({'loss': loss, 'learning_rate': scheduler.get_last_lr()[0]})
+        tqdm.write(f"Iteration {iteration}: Loss = {loss:.5f}, Backbone LR = {scheduler.get_last_lr()[0]}, Head LR = {scheduler.get_last_lr()[1]}")
 
-        if iteration % eval_interval == 0 and rank == 0:
-            val_loss, val_accuracy = evaluate(model, eval_dataloader, criterion, rank)
-            print(f"Evaluation at iteration {iteration}: Val Loss: {val_loss:.4f}, Val Accuracy: {val_accuracy:.2f}%")
+        if iteration % eval_interval == 0 :
+            val_loss, val_accuracy = evaluate(model, eval_dataloader, criterion, device)
+            tqdm.write(f"Evaluation at iteration {iteration}: Val Loss: {val_loss:.4f}, Val Accuracy: {val_accuracy:.2f}%")
 
-            save_checkpoint(model, optimizer, scheduler, 0, iteration, output_dir, cfg, is_best=(val_accuracy > best_val_accuracy))
+            save_checkpoint(model, optimizer, scheduler, 0, iteration, output_dir, cfg, class_to_idx, is_best=(val_accuracy > best_val_accuracy))
             if val_accuracy > best_val_accuracy:
                 best_val_accuracy = val_accuracy
 
         scheduler.step()
 
-    if rank == 0:  # 주 프로세스에서만 저장
-        save_final_model(model, optimizer, scheduler, output_dir, cfg)
-        print(f"Final model saved to {os.path.join(output_dir, 'final_model')}")
-
-
-    destroy_process_group()
-
-def main(cfg, args):
-    world_size = args.world_size
-    mp.spawn(train, args=(world_size, cfg), nprocs=world_size, join=True)
+    save_final_model(model, optimizer, scheduler, output_dir, cfg, class_to_idx)
+    print(f"Final model saved to {os.path.join(output_dir, 'final_model')}")
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Train a classification model with FSDP')
-    parser.add_argument('--world-size', type=int, default=torch.cuda.device_count(), help='Number of processes')
-    parser.add_argument("--rank", type=int, default=0, help="Rank of the current process")
-    parser.add_argument("--master_addr", type=str, default="127.0.0.1", help="Address of the master node")
-    parser.add_argument("--master_port", type=str, default="29500", help="Port of the master node")
-    args = parser.parse_args()
-
 
     cfg = Config().get_cfg()
 
-    main(cfg, args)
+    train(cfg)
