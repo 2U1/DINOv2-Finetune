@@ -106,6 +106,7 @@ class ReIDDataset(Dataset):
         if self.rcs_enabled:
             img, label = self.get_rare_class_sample()
         else:
+            print(f"Accessing index: {idx}, Total samples: {len(self.file_list)}")
             img_path = self.file_list[idx]
             label = self.labels[idx]
             img = Image.open(img_path).convert('RGB')
@@ -129,3 +130,30 @@ class InfiniteSampler(Sampler):
     def __len__(self):
         # len을 무한으로 설정할 수 없으므로, 매우 큰 값으로 설정
         return int(1e10)
+    
+class EvalDataset(Dataset):
+    def __init__(self, data_root, transform=None, phase='val', class_to_idx=None):
+        self.data_root = data_root
+        self.transform = transform
+        self.phase = phase
+        self.class_to_idx = class_to_idx
+
+        self.file_list = make_datapath_list(data_root)
+        self.class_names = sorted({extract_label_from_path(f, data_root) for f in self.file_list})
+        self.labels = [self.class_to_idx[extract_label_from_path(f, data_root)] for f in self.file_list]
+
+
+    def __getitem__(self, idx):
+        img_path = self.file_list[idx]
+        label = self.labels[idx]
+        img = Image.open(img_path).convert('RGB')
+
+        if self.transform:
+            img = self.transform(img, self.phase)
+
+        return img, label
+
+    def __len__(self):
+        return len(self.file_list)
+
+

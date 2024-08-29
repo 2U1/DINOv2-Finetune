@@ -6,7 +6,7 @@ import torch.nn as nn
 import itertools
 import numpy as np
 from src.model import Classifier
-from src.dataset import ReIDDataset, ImageTransform, InfiniteSampler
+from src.dataset import ReIDDataset, ImageTransform, InfiniteSampler, EvalDataset
 from src.config import Config
 import json
 from tqdm import tqdm
@@ -143,7 +143,7 @@ def train(cfg):
     train_dataloader = DataLoader(train_dataset, batch_size=total_batch_size, sampler=train_sampler, num_workers=8)
 
     # Eval dataset
-    eval_dataset = ReIDDataset(cfg=dataset_cfg['eval'], transform=transform, phase='val')
+    eval_dataset = EvalDataset(data_root=dataset_cfg['eval']['data_root'], transform=transform, phase='val', class_to_idx=class_to_idx) 
     eval_dataloader = DataLoader(eval_dataset, batch_size=total_batch_size, shuffle=False, num_workers=8)
 
     model = Classifier(num_classes=cfg['num_classes'], backbone=cfg['backbone'], head=cfg['head']).to(device)
@@ -165,8 +165,6 @@ def train(cfg):
     scheduler = get_scheduler(optimizer, cfg['scheduler_type'], num_iterations, cfg['warmup_ratio'])
     
     criterion = nn.CrossEntropyLoss()
-
-    # inifinite_datalodaer = itertools.cycle(train_dataloader)
 
     output_dir = cfg.get('output_dir', './outputs')
     os.makedirs(output_dir, exist_ok=True)
