@@ -2,8 +2,9 @@ import torch
 import torch.nn as nn
 from torch.hub import load
 import math
+import timm
 
-dino_backbones = {
+MODEL_LIST = {
     'dinov2_s':{
         'name':'dinov2_vits14',
         'embedding_size':384,
@@ -24,6 +25,11 @@ dino_backbones = {
         'embedding_size':1536,
         'patch_size':14
     },
+    'siglip_384':{
+        'name': 'vit_so400m_patch14_siglip_384',
+        'embedding_size':1152,
+        'path_size': 14
+    }
 }
 
 def bilinear_interpolate_pos_encoding(self, x, w, h):
@@ -31,8 +37,8 @@ def bilinear_interpolate_pos_encoding(self, x, w, h):
     npatch = x.shape[1] - 1
     N = self.pos_embed.shape[1] - 1
     if npatch == N and w == h:
-        return self.pos_embed.to(x.device)  # x와 동일한 장치로 이동
-    pos_embed = self.pos_embed.float().to(x.device)  # 위치 인코딩 텐서를 x와 동일한 장치로 이동
+        return self.pos_embed.to(x.device)  # Move to same device as input
+    pos_embed = self.pos_embed.float().to(x.device)  # Move to same device as input
     class_pos_embed = pos_embed[:, 0]
     patch_pos_embed = pos_embed[:, 1:]
     dim = x.shape[-1]
@@ -59,27 +65,51 @@ def bilinear_interpolate_pos_encoding(self, x, w, h):
 
 
 class linear_head(nn.Module):
-    def __init__(self, embedding_size = 384, num_classes = 10):
+    def __init__(self, embedding_size = 384, num_classes = 10, hidden_dims=[512, 256], dropout=0.1):
         super(linear_head, self).__init__()
         self.fc = nn.Linear(embedding_size, num_classes)
 
     def forward(self, x):
         return self.fc(x)
     
+class multi_linear_head(nn.Module):
+    def __init__(self, embedding_size = 384, num_classes = 10, hidden_dims=[512, 256], dropout=0.1):
+        super(multi_linear_head, self).__init__()
+
+        layers = []
+        current_dim = embedding_size
+
+        for hidden_dim in hidden_dims:
+            layers.append(nn.Linear(current_dim, hidden_dim))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(dropout))
+            current_dim = hidden_dim
+
+        layers.append(nn.Linear(current_dim, num_classes))
+
+        self.classifier_head = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.classifier_head(x)
+    
 
 class Classifier(nn.Module):
-    def __init__(self, num_classes, backbone = 'dinov2_s', head = 'linear', backbones = dino_backbones):
+    def __init__(self, num_classes, backbone = 'dinov2_s', head = 'linear', hidden_dims = [512, 256], dropout=0.1):
         super(Classifier, self).__init__()
         self.heads = {
-            'linear':linear_head
+            'linear':linear_head,
+            'mlp': multi_linear_head
         }
-        self.backbones = dino_backbones
-        self.backbone = load('facebookresearch/dinov2', self.backbones[backbone]['name'])
-
-        # Monkey patching the interpolate_pos_encoding method to allow for bilinear interpolation
-        self.backbone.interpolate_pos_encoding = bilinear_interpolate_pos_encoding.__get__(self.backbone, type(self.backbone))
+        self.backbones = MODEL_LIST
         
-        self.head = self.heads[head](self.backbones[backbone]['embedding_size'],num_classes)
+        if backbone in ['dinov2_s', 'dinov2_b', 'dinov2_l', 'dinov2_g']:
+            self.backbone = load('facebookresearch/dinov2', self.backbones[backbone]['name'])
+             # Monkey patching the interpolate_pos_encoding method to allow for bilinear interpolation
+            self.backbone.interpolate_pos_encoding = bilinear_interpolate_pos_encoding.__get__(self.backbone, type(self.backbone))
+        else:
+            self.backbone = timm.create_model(self.backbones[backbone]['name'], pretrained=True, num_classes=0)
+
+        self.head = self.heads[head](self.backbones[backbone]['embedding_size'], num_classes, hidden_dims, dropout=0.1)
 
     def forward(self, x):
         x = self.backbone(x)

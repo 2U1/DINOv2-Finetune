@@ -106,7 +106,7 @@ class ReIDDataset(Dataset):
         if self.rcs_enabled:
             img, label = self.get_rare_class_sample()
         else:
-            print(f"Accessing index: {idx}, Total samples: {len(self.file_list)}")
+            # print(f"Accessing index: {idx}, Total samples: {len(self.file_list)}")
             img_path = self.file_list[idx]
             label = self.labels[idx]
             img = Image.open(img_path).convert('RGB')
@@ -155,5 +155,3 @@ class EvalDataset(Dataset):
 
     def __len__(self):
         return len(self.file_list)
-
-

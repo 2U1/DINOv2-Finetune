@@ -1,9 +1,8 @@
-import torch.distributed as dist
 import os
 import torch
 from torch.utils.data import DataLoader
 import torch.nn as nn
-import itertools
+import torch.optim as optim
 import numpy as np
 from src.model import Classifier
 from src.dataset import ReIDDataset, ImageTransform, InfiniteSampler, EvalDataset
@@ -34,17 +33,14 @@ def save_final_model(model, optimizer, scheduler, save_dir, cfg, class_to_idx):
     final_model_path = os.path.join(final_dir, "final_model.pth")
     torch.save(checkpoint, final_model_path)
 
-    # Config 파일 저장
     config_path = os.path.join(final_dir, "config.json")
     with open(config_path, 'w') as f:
         json.dump(cfg, f, indent=4)
     
 def save_checkpoint(model, optimizer, scheduler, epoch, iteration, save_dir, cfg, class_to_idx, is_best=False):
-    # Iteration별로 폴더 생성
     checkpoint_dir = os.path.join(save_dir, f"checkpoint-{iteration}")
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    # 모델, 옵티마이저, 스케줄러 상태 저장
     checkpoint = {
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
@@ -54,44 +50,89 @@ def save_checkpoint(model, optimizer, scheduler, epoch, iteration, save_dir, cfg
         'class_to_idx': class_to_idx
     }
 
-    # 체크포인트 저장 경로
     checkpoint_path = os.path.join(checkpoint_dir, "checkpoint.pth")
     torch.save(checkpoint, checkpoint_path)
 
-    # Config 파일 저장
     config_path = os.path.join(checkpoint_dir, "config.json")
     with open(config_path, 'w') as f:
         json.dump(cfg, f, indent=4)
 
-    # 최상의 성능 모델 저장
     if is_best:
         best_checkpoint_dir = os.path.join(save_dir, f"best_checkpoint-{iteration}")
         os.makedirs(best_checkpoint_dir, exist_ok=True)
         best_checkpoint_path = os.path.join(best_checkpoint_dir, "best_checkpoint.pth")
         torch.save(checkpoint, best_checkpoint_path)
 
-        # Config 파일 저장
         best_config_path = os.path.join(best_checkpoint_dir, "config.json")
         with open(best_config_path, 'w') as f:
             json.dump(cfg, f, indent=4)
     
-def get_scheduler(optimizer, scheduler_type, num_iterations, warmup_ratio):
+def get_scheduler(optimizer, scheduler_config, num_iterations):
+    scheduler_type = scheduler_config['type']
+    scheduler_params = scheduler_config.get('params', {})
+    
     if scheduler_type == 'linear':
+        warmup_ratio = scheduler_params.get('warmup_ratio', 0.03)
         warmup_steps = int(num_iterations * warmup_ratio)
         scheduler = torch.optim.lr_scheduler.LinearLR(
             optimizer,
-            start_factor=1/num_iterations,
+            start_factor=scheduler_params.get('start_factor', 1/num_iterations),
             total_iters=warmup_steps
         )
+    
     elif scheduler_type == 'step':
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=num_iterations // 3, gamma=0.1)
+        step_size = scheduler_params.get('step_size', num_iterations // 3)
+        gamma = scheduler_params.get('gamma', 0.1)
+        scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=step_size,
+            gamma=gamma
+        )
+    
     elif scheduler_type == 'cosine':
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_iterations)
+        T_max = scheduler_params.get('T_max', num_iterations)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=T_max
+        )
+    
     elif scheduler_type == 'exponential':
-        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
+        gamma = scheduler_params.get('gamma', 0.9)
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(
+            optimizer,
+            gamma=gamma
+        )
+    
     else:
         raise ValueError(f"Unknown scheduler type: {scheduler_type}")
+    
     return scheduler
+
+def get_optimizer(optimizer_config, backbone_params, head_params):
+
+    optimizer_type = optimizer_config['type']
+    optimizer_params = optimizer_config['params']
+    learning_rates = optimizer_config['learning_rate']
+
+    if optimizer_type == 'AdamW':
+        optimizer = optim.AdamW([
+            {'params': backbone_params, 'lr': learning_rates['backbone_lr']},
+            {'params': head_params, 'lr': learning_rates['head_lr']}
+        ], **optimizer_params)
+    elif optimizer_type == 'SGD':
+        optimizer = optim.SGD([
+            {'params': backbone_params, 'lr': learning_rates['backbone_lr']},
+            {'params': head_params, 'lr': learning_rates['head_lr']}
+        ], **optimizer_params)
+    elif optimizer_type == 'Adam':
+        optimizer = optim.Adam([
+            {'params': backbone_params, 'lr': learning_rates['backbone_lr']},
+            {'params': head_params, 'lr': learning_rates['head_lr']}
+        ], **optimizer_params)
+    else:
+        raise ValueError(f"Unknown optimizer type: {optimizer_type}")
+    
+    return optimizer
 
 def train_step(model, data, target, optimizer, criterion):
     optimizer.zero_grad()
@@ -125,44 +166,77 @@ def evaluate(model, dataloader, criterion, device):
 
     return avg_loss, accuracy
 
-def train(cfg):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+def make_supervised_dataset(cfg, epoch_based=False):
     dataset_cfg = cfg['dataset']
-    eval_interval = cfg['eval_step']
-    num_iterations = text_to_number(cfg['iterations'])
-
-    total_batch_size = cfg['batch_per_gpu'] * torch.cuda.device_count()
-
     transform = ImageTransform(cfg['resize'], cfg['mean'], cfg['std'])
 
-    # Train dataset
-    train_dataset = ReIDDataset(cfg=dataset_cfg['train'], transform=transform, phase='train')
-    class_to_idx = train_dataset.class_to_idx  # 클래스 정보를 가져옴
-    train_sampler = InfiniteSampler(train_dataset)
-    train_dataloader = DataLoader(train_dataset, batch_size=total_batch_size, sampler=train_sampler, num_workers=8)
+    total_batch_size = cfg['batch_per_gpu'] * torch.cuda.device_count()
+    
+    if epoch_based:
+        train_dataset = ReIDDataset(cfg=dataset_cfg['train'], transform=transform, phase='train')
+        train_dataloader = DataLoader(train_dataset, batch_size=total_batch_size, shuffle=True, num_workers=8)
 
-    # Eval dataset
+    else:
+        train_dataset = ReIDDataset(cfg=dataset_cfg['train'], transform=transform, phase='train')
+        train_sampler = InfiniteSampler(train_dataset)
+        train_dataloader = DataLoader(train_dataset, batch_size=total_batch_size, sampler=train_sampler, num_workers=8)
+
+    class_to_idx = train_dataset.class_to_idx
+
     eval_dataset = EvalDataset(data_root=dataset_cfg['eval']['data_root'], transform=transform, phase='val', class_to_idx=class_to_idx) 
     eval_dataloader = DataLoader(eval_dataset, batch_size=total_batch_size, shuffle=False, num_workers=8)
 
-    model = Classifier(num_classes=cfg['num_classes'], backbone=cfg['backbone'], head=cfg['head']).to(device)
+    return dict(
+        train_loader=train_dataloader,
+        eval_loader=eval_dataloader,
+        class_to_idx=class_to_idx
+    )
+
+def train(cfg):
+    
+    assert not ('num_train_epoch' in cfg and 'iterations' in cfg), \
+        "Error: 'num_train_epoch' and 'iterations' cannot be used together. Choose one."
+    
+    epoch_based = False
+    
+    if 'num_train_epoch' in cfg:
+        epoch_based = True
+        if 'rare_class_sampling' in cfg['dataset']['train']:
+            print("num_train_epoch detected. Removing 'rare_class_sampling' from config.")
+            print("Epoch based is set. Eval step will be ignored and will be evaluated every epoch.")
+            del cfg['dataset']['train']['rare_class_sampling']
+
+        num_epochs = cfg['num_train_epoch']
+        dataset_dict = make_supervised_dataset(cfg, epoch_based)
+        num_iterations = len(dataset_dict['train_loader']) * num_epochs
+
+    else:
+        num_epochs = None
+        num_iterations = text_to_number(cfg['iterations'])
+        dataset_dict = make_supervised_dataset(cfg, epoch_based)
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    eval_interval = cfg['eval_step']
+    model_config = cfg['model']
+    optimizer_config = cfg['optimizer']
+    scheduler_config = cfg['scheduler']
+
+    model = Classifier(**model_config).to(device)
+
+    train_dataloader = dataset_dict['train_loader']
+    eval_dataloader = dataset_dict['eval_loader']
+    class_to_idx = dataset_dict['class_to_idx']
     
     if torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
 
-    # Set different learning rates for the backbone and head
     backbone_params = model.module.backbone.parameters() if isinstance(model, nn.DataParallel) else model.backbone.parameters()
     head_params = model.module.head.parameters() if isinstance(model, nn.DataParallel) else model.head.parameters()
     
-    # Optimizer with different learning rates for backbone and classifier
-    optimizer = torch.optim.AdamW([
-        {'params': backbone_params, 'lr': cfg['backbone_lr']},
-        {'params': head_params, 'lr': cfg['head_lr'] }
-    ], weight_decay=cfg['weight_decay'], betas=(cfg['beta1'], cfg['beta2']), eps=cfg['eps'])
-
+    optimizer = get_optimizer(optimizer_config, backbone_params, head_params)
     
-    scheduler = get_scheduler(optimizer, cfg['scheduler_type'], num_iterations, cfg['warmup_ratio'])
+    scheduler = get_scheduler(optimizer, scheduler_config, num_iterations)
     
     criterion = nn.CrossEntropyLoss()
 
@@ -171,27 +245,57 @@ def train(cfg):
 
     best_val_accuracy = 0.0
 
-    pbar = tqdm(range(num_iterations), desc=f"Training", dynamic_ncols=True)
+    
+    if epoch_based:
+        pbar = tqdm(total=num_iterations, desc=f"Training", dynamic_ncols=True)
+        total_steps_per_epoch = len(train_dataloader)
+        global_step = 0
 
-    for iteration in pbar:
-        model.train()
-        data, target = next(iter(train_dataloader))
-        data = data.to(device)
-        target = target.to(device)
-        loss = train_step(model, data, target, optimizer, criterion)
-        
-        # pbar.set_postfix({'loss': loss, 'learning_rate': scheduler.get_last_lr()[0]})
-        tqdm.write(f"Iteration {iteration}: Loss = {loss:.5f}, Backbone LR = {scheduler.get_last_lr()[0]}, Head LR = {scheduler.get_last_lr()[1]}")
+        for epoch in range(num_epochs):
+            model.train()
+            for step, (data, target) in enumerate(train_dataloader):
+                data = data.to(device)
+                target = target.to(device)
+                loss = train_step(model, data, target, optimizer, criterion)
+                
+                global_step += 1
+                pbar.update(1)
 
-        if iteration % eval_interval == 0 :
+                current_epoch_progress = epoch + (step + 1) / total_steps_per_epoch
+
+                tqdm.write(f"Iteration {global_step}: Loss = {loss:.5f}, Backbone LR = {scheduler.get_last_lr()[0]}, Head LR = {scheduler.get_last_lr()[1]}, Epoch Progress = {current_epoch_progress:.2f}")
+
+                scheduler.step()
+
             val_loss, val_accuracy = evaluate(model, eval_dataloader, criterion, device)
-            tqdm.write(f"Evaluation at iteration {iteration}: Val Loss: {val_loss:.4f}, Val Accuracy: {val_accuracy:.2f}%")
+            tqdm.write(f"Evaluation at iteration {global_step}: Val Loss: {val_loss:.4f}, Val Accuracy: {val_accuracy:.2f}%")
 
-            save_checkpoint(model, optimizer, scheduler, 0, iteration, output_dir, cfg, class_to_idx, is_best=(val_accuracy > best_val_accuracy))
+            # Save the checkpoint if it's the best accuracy so far
+            save_checkpoint(model, optimizer, scheduler, epoch, global_step, output_dir, cfg, class_to_idx, is_best=(val_accuracy > best_val_accuracy))
+            
             if val_accuracy > best_val_accuracy:
                 best_val_accuracy = val_accuracy
+            
+    else:
+        pbar = tqdm(range(num_iterations), desc=f"Training", dynamic_ncols=True)
+        for iteration in pbar:
+            model.train()
+            data, target = next(iter(train_dataloader))
+            data = data.to(device)
+            target = target.to(device)
+            loss = train_step(model, data, target, optimizer, criterion)
 
-        scheduler.step()
+            tqdm.write(f"Iteration {iteration}: Loss = {loss:.5f}, Backbone LR = {scheduler.get_last_lr()[0]}, Head LR = {scheduler.get_last_lr()[1]}")
+
+            if iteration % eval_interval == 0 :
+                val_loss, val_accuracy = evaluate(model, eval_dataloader, criterion, device)
+                tqdm.write(f"Evaluation at iteration {iteration}: Val Loss: {val_loss:.4f}, Val Accuracy: {val_accuracy:.2f}%")
+
+                save_checkpoint(model, optimizer, scheduler, 0, iteration, output_dir, cfg, class_to_idx, is_best=(val_accuracy > best_val_accuracy))
+                if val_accuracy > best_val_accuracy:
+                    best_val_accuracy = val_accuracy
+
+            scheduler.step()
 
     save_final_model(model, optimizer, scheduler, output_dir, cfg, class_to_idx)
     print(f"Final model saved to {os.path.join(output_dir, 'final_model')}")
