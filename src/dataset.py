@@ -43,6 +43,20 @@ def get_rcs_class_probs(data_root, temperature):
 
     return list(overall_class_stats.keys()), freq.numpy()
 
+def make_samples_per_class(data_root, class_to_idx, class_names):
+    with open(osp.join(data_root, 'class_stats.json'), 'r') as of:
+        class_stats = json.load(of)
+
+    samples_per_class = []
+    
+    for class_name, class_idx in class_to_idx.items():
+        if class_name in class_stats:
+            samples_per_class.append(class_stats[class_name])
+        else:
+            raise KeyError(f"Class name {class_name} not found in class_stats.json")
+        
+    return samples_per_class
+
 def make_datapath_list(data_root):
     target_path = osp.join(data_root, '*/*')
     path_list = glob.glob(target_path)
@@ -73,6 +87,8 @@ class ReIDDataset(Dataset):
         rcs_cfg = cfg.get('rare_clas_sampling')
         self.rcs_enabled = rcs_cfg is not None
 
+        self.samples_per_class = make_samples_per_class(cfg['data_root'], self.class_to_idx, self.class_names)
+
         if self.rcs_enabled:
             self.rcs_class_temp = rcs_cfg['class_temp']
             
@@ -93,6 +109,15 @@ class ReIDDataset(Dataset):
             for c in self.rcs_classes:
                 if len(self.samples_with_class[c]) == 0:
                     raise ValueError(f"No samples found for class {c}. Check the dataset.")
+                
+
+    def get_samples_per_class(self):
+
+        return self.samples_per_class
+    
+    def get_class_to_idx(self):
+
+        return self.class_to_idx
 
     def get_rare_class_sample(self):
         c = np.random.choice(self.rcs_classes, p=self.rcs_classprob)
@@ -106,7 +131,6 @@ class ReIDDataset(Dataset):
         if self.rcs_enabled:
             img, label = self.get_rare_class_sample()
         else:
-            # print(f"Accessing index: {idx}, Total samples: {len(self.file_list)}")
             img_path = self.file_list[idx]
             label = self.labels[idx]
             img = Image.open(img_path).convert('RGB')
@@ -124,11 +148,9 @@ class InfiniteSampler(Sampler):
         self.dataset = dataset
 
     def __iter__(self):
-        # itertools.cycle을 사용하여 데이터셋 인덱스를 무한 반복
         return iter(itertools.cycle(range(len(self.dataset))))
 
     def __len__(self):
-        # len을 무한으로 설정할 수 없으므로, 매우 큰 값으로 설정
         return int(1e10)
     
 class EvalDataset(Dataset):

@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch.hub import load
 import math
 import timm
+import torch.nn.init as init
 
 MODEL_LIST = {
     'dinov2_s':{
@@ -65,9 +66,14 @@ def bilinear_interpolate_pos_encoding(self, x, w, h):
 
 
 class linear_head(nn.Module):
-    def __init__(self, embedding_size = 384, num_classes = 10, hidden_dims=[512, 256], dropout=0.1):
+    def __init__(self, embedding_size = 384, num_classes = 10, *args, **kwargs):
         super(linear_head, self).__init__()
         self.fc = nn.Linear(embedding_size, num_classes)
+
+        init.xavier_uniform_(self.fc.weight)
+        
+        if self.fc.bias is not None:
+            init.zeros_(self.fc.bias)
 
     def forward(self, x):
         return self.fc(x)
@@ -80,24 +86,27 @@ class multi_linear_head(nn.Module):
         current_dim = embedding_size
 
         for hidden_dim in hidden_dims:
-            layers.append(nn.Linear(current_dim, hidden_dim))
+            linear_layer = nn.Linear(current_dim, hidden_dim)
+            init.kaiming_normal_(linear_layer.weight, mode='fan_out', nonlinearity='relu')
+            layers.append(linear_layer)
             layers.append(nn.ReLU())
             layers.append(nn.Dropout(dropout))
             current_dim = hidden_dim
 
-        layers.append(nn.Linear(current_dim, num_classes))
+        final_layer = nn.Linear(current_dim, num_classes)
+        init.kaiming_normal_(final_layer.weight, mode='fan_out', nonlinearity='relu')
+        layers.append(final_layer)
 
         self.classifier_head = nn.Sequential(*layers)
 
     def forward(self, x):
         return self.classifier_head(x)
-    
 
 class Classifier(nn.Module):
-    def __init__(self, num_classes, backbone = 'dinov2_s', head = 'linear', hidden_dims = [512, 256], dropout=0.1):
+    def __init__(self, num_classes, backbone = 'dinov2_s', head = 'single', hidden_dims = [512, 256], dropout=0.1, freeze_backbone=False, **kwargs):
         super(Classifier, self).__init__()
         self.heads = {
-            'linear':linear_head,
+            'single':linear_head,
             'mlp': multi_linear_head
         }
         self.backbones = MODEL_LIST
@@ -109,7 +118,11 @@ class Classifier(nn.Module):
         else:
             self.backbone = timm.create_model(self.backbones[backbone]['name'], pretrained=True, num_classes=0)
 
-        self.head = self.heads[head](self.backbones[backbone]['embedding_size'], num_classes, hidden_dims, dropout=0.1)
+        self.head = self.heads[head](self.backbones[backbone]['embedding_size'], num_classes, hidden_dims, dropout=dropout)
+
+        if freeze_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
 
     def forward(self, x):
         x = self.backbone(x)

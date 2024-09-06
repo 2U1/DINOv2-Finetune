@@ -1,16 +1,23 @@
-import os
 import torch
 from torch.utils.data import DataLoader
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
+from torch.amp import autocast
+
+import os
+import json
+from tqdm import tqdm
+import glob
+
 from src.model import Classifier
 from src.dataset import ReIDDataset, ImageTransform, InfiniteSampler, EvalDataset
 from src.config import Config
-import json
-from tqdm import tqdm
-from torch.amp import autocast
-import json
+from src.loss import LossFactory
+
+
+torch.random.manual_seed(0)
+np.random.seed(0)
 
 def text_to_number(text):
     units = {"k": 1000, "m": 1000000, "b": 1000000000}
@@ -38,6 +45,7 @@ def save_final_model(model, optimizer, scheduler, save_dir, cfg, class_to_idx):
         json.dump(cfg, f, indent=4)
     
 def save_checkpoint(model, optimizer, scheduler, epoch, iteration, save_dir, cfg, class_to_idx, is_best=False):
+    max_checkpoints = cfg.get('max_checkpoints', 5)
     checkpoint_dir = os.path.join(save_dir, f"checkpoint-{iteration}")
     os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -66,7 +74,23 @@ def save_checkpoint(model, optimizer, scheduler, epoch, iteration, save_dir, cfg
         best_config_path = os.path.join(best_checkpoint_dir, "config.json")
         with open(best_config_path, 'w') as f:
             json.dump(cfg, f, indent=4)
+
+    manage_checkpoints(save_dir, max_checkpoints)
+
+
+def manage_checkpoints(save_dir, max_checkpoints):
+    # checkpoint 디렉토리 안에 있는 모든 체크포인트 디렉토리 목록 가져오기
+    checkpoint_dirs = sorted(glob.glob(os.path.join(save_dir, "checkpoint-*")), key=os.path.getmtime)
+
+    # 최대 체크포인트 개수를 초과하는 경우 오래된 체크포인트 삭제
+    if len(checkpoint_dirs) > max_checkpoints:
+        num_to_remove = len(checkpoint_dirs) - max_checkpoints
+        for i in range(num_to_remove):
+            old_checkpoint_dir = checkpoint_dirs[i]
+            print(f"Deleting old checkpoint: {old_checkpoint_dir}")
+            os.system(f"rm -rf {old_checkpoint_dir}")  # 전체 디렉토리 삭제
     
+
 def get_scheduler(optimizer, scheduler_config, num_iterations):
     scheduler_type = scheduler_config['type']
     scheduler_params = scheduler_config.get('params', {})
@@ -108,27 +132,25 @@ def get_scheduler(optimizer, scheduler_config, num_iterations):
     
     return scheduler
 
-def get_optimizer(optimizer_config, backbone_params, head_params):
+def get_optimizer(optimizer_config, backbone_params=None, head_params=None):
 
     optimizer_type = optimizer_config['type']
     optimizer_params = optimizer_config['params']
     learning_rates = optimizer_config['learning_rate']
 
+    optimizer_grouped_parameters = [
+        {'params': head_params, 'lr': learning_rates['head_lr']},
+    ]
+
+    if backbone_params is not None:
+        optimizer_grouped_parameters.append({'params': backbone_params, 'lr': learning_rates['backbone_lr']})
+
     if optimizer_type == 'AdamW':
-        optimizer = optim.AdamW([
-            {'params': backbone_params, 'lr': learning_rates['backbone_lr']},
-            {'params': head_params, 'lr': learning_rates['head_lr']}
-        ], **optimizer_params)
+        optimizer = optim.AdamW(optimizer_grouped_parameters, **optimizer_params)
     elif optimizer_type == 'SGD':
-        optimizer = optim.SGD([
-            {'params': backbone_params, 'lr': learning_rates['backbone_lr']},
-            {'params': head_params, 'lr': learning_rates['head_lr']}
-        ], **optimizer_params)
+        optimizer = optim.SGD(optimizer_grouped_parameters, **optimizer_params)
     elif optimizer_type == 'Adam':
-        optimizer = optim.Adam([
-            {'params': backbone_params, 'lr': learning_rates['backbone_lr']},
-            {'params': head_params, 'lr': learning_rates['head_lr']}
-        ], **optimizer_params)
+        optimizer = optim.Adam(optimizer_grouped_parameters, **optimizer_params)
     else:
         raise ValueError(f"Unknown optimizer type: {optimizer_type}")
     
@@ -144,7 +166,7 @@ def train_step(model, data, target, optimizer, criterion):
     return loss.item()
 
 def evaluate(model, dataloader, criterion, device):
-    model.eval()  # 평가 모드로 설정
+    model.eval()
     total_loss = 0.0
     correct = 0
     total = 0
@@ -181,7 +203,8 @@ def make_supervised_dataset(cfg, epoch_based=False):
         train_sampler = InfiniteSampler(train_dataset)
         train_dataloader = DataLoader(train_dataset, batch_size=total_batch_size, sampler=train_sampler, num_workers=8)
 
-    class_to_idx = train_dataset.class_to_idx
+    class_to_idx = train_dataset.get_class_to_idx()
+    samples_per_class = train_dataset.get_samples_per_class()
 
     eval_dataset = EvalDataset(data_root=dataset_cfg['eval']['data_root'], transform=transform, phase='val', class_to_idx=class_to_idx) 
     eval_dataloader = DataLoader(eval_dataset, batch_size=total_batch_size, shuffle=False, num_workers=8)
@@ -189,7 +212,8 @@ def make_supervised_dataset(cfg, epoch_based=False):
     return dict(
         train_loader=train_dataloader,
         eval_loader=eval_dataloader,
-        class_to_idx=class_to_idx
+        class_to_idx=class_to_idx,
+        samples_per_class=samples_per_class
     )
 
 def train(cfg):
@@ -221,31 +245,38 @@ def train(cfg):
     model_config = cfg['model']
     optimizer_config = cfg['optimizer']
     scheduler_config = cfg['scheduler']
+    loss_config = cfg['loss']
+    num_classes = cfg['model']['num_classes']
 
     model = Classifier(**model_config).to(device)
 
     train_dataloader = dataset_dict['train_loader']
     eval_dataloader = dataset_dict['eval_loader']
     class_to_idx = dataset_dict['class_to_idx']
+    samples_per_class = dataset_dict['samples_per_class']
     
     if torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
 
-    backbone_params = model.module.backbone.parameters() if isinstance(model, nn.DataParallel) else model.backbone.parameters()
+    if model_config['freeze_backbone']:
+        backbone_params = None
+    else:
+        backbone_params = model.module.backbone.parameters() if isinstance(model, nn.DataParallel) else model.backbone.parameters()
+    
     head_params = model.module.head.parameters() if isinstance(model, nn.DataParallel) else model.head.parameters()
     
     optimizer = get_optimizer(optimizer_config, backbone_params, head_params)
     
     scheduler = get_scheduler(optimizer, scheduler_config, num_iterations)
-    
-    criterion = nn.CrossEntropyLoss()
+
+    loss_factory = LossFactory(loss_config, samples_per_class, num_classes=num_classes)
+    criterion = loss_factory.get_loss()
 
     output_dir = cfg.get('output_dir', './outputs')
     os.makedirs(output_dir, exist_ok=True)
 
     best_val_accuracy = 0.0
 
-    
     if epoch_based:
         pbar = tqdm(total=num_iterations, desc=f"Training", dynamic_ncols=True)
         total_steps_per_epoch = len(train_dataloader)
