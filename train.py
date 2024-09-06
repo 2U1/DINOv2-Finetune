@@ -79,16 +79,14 @@ def save_checkpoint(model, optimizer, scheduler, epoch, iteration, save_dir, cfg
 
 
 def manage_checkpoints(save_dir, max_checkpoints):
-    # checkpoint 디렉토리 안에 있는 모든 체크포인트 디렉토리 목록 가져오기
     checkpoint_dirs = sorted(glob.glob(os.path.join(save_dir, "checkpoint-*")), key=os.path.getmtime)
 
-    # 최대 체크포인트 개수를 초과하는 경우 오래된 체크포인트 삭제
     if len(checkpoint_dirs) > max_checkpoints:
         num_to_remove = len(checkpoint_dirs) - max_checkpoints
         for i in range(num_to_remove):
             old_checkpoint_dir = checkpoint_dirs[i]
             print(f"Deleting old checkpoint: {old_checkpoint_dir}")
-            os.system(f"rm -rf {old_checkpoint_dir}")  # 전체 디렉토리 삭제
+            os.system(f"rm -rf {old_checkpoint_dir}")
     
 
 def get_scheduler(optimizer, scheduler_config, num_iterations):
