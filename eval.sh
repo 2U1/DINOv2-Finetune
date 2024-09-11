@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 기본 변수 설정
-MODEL_PATH="/home/workspace/dinov2-ft/output/0905/final_model"  # 모델 체크포인트 경로
+MODEL_PATH="/home/workspace/dinov2-ft/output/0906_CBCELoss/best_checkpoint-79886"  # 모델 체크포인트 경로
 DATA_PATH="/home/workspace/reid/test"  # 데이터 경로
 BATCH_SIZE=1024  # 배치 크기
 TOP_K=5  # Top-K 설정

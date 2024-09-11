@@ -66,8 +66,10 @@ def main(args):
 
     # Remapping labels for evaluation dataset
     class_to_idx = checkpoint['class_to_idx']
+
+    model_cfg = cfg['model']
     
-    model = Classifier(num_classes=cfg['num_classes'], backbone=cfg['backbone'], head=cfg['head']).to(device)
+    model = Classifier(num_classes=model_cfg['num_classes'], backbone=model_cfg['backbone'], head=model_cfg['head']).to(device)
     state_dict = remove_module_from_state_dict(checkpoint['model_state_dict'])
     model.load_state_dict(state_dict)
 
