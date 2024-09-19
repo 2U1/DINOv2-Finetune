@@ -16,7 +16,6 @@ def calculate_class_stats(dataset_path):
 def parse_args():
     parser = argparse.ArgumentParser(description='Calculate image class stats for a classification dataset')
     parser.add_argument('dataset_path', help='Path to the image classification dataset')
-    parser.add_argument('-o', '--out-dir', help='Output directory to save stats')
     args = parser.parse_args()
     return args
 
@@ -28,10 +27,9 @@ def save_class_stats(out_dir, class_stats):
 def main():
     args = parse_args()
     dataset_path = args.dataset_path
-    out_dir = args.out_dir if args.out_dir else dataset_path
 
     class_stats = calculate_class_stats(dataset_path)
-    save_class_stats(out_dir, class_stats)
+    save_class_stats(dataset_path, class_stats)
 
 if __name__ == '__main__':
     main()

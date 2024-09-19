@@ -8,7 +8,7 @@ import json
 import argparse
 
 def evaluate(model, dataloader, device, k=5):
-    model.eval()  # 평가 모드로 설정
+    model.eval()
     correct = 0
     total = 0
     top_k_correct = 0

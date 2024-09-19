@@ -1,3 +1,6 @@
+# Rare class sampling (RCS) implementation is modified from the original code.
+# https://github.com/lhoyer/DAFormer/blob/master/mmseg/datasets/uda_dataset.py
+
 import os.path as osp
 from torch.utils.data import Dataset, Sampler
 import torch
@@ -67,7 +70,7 @@ def extract_label_from_path(file_path, data_root):
     class_name = osp.basename(osp.dirname(file_path))
     return class_name
 
-class ReIDDataset(Dataset):
+class TrainDataset(Dataset):
     def __init__(self, cfg, transform=None, phase='train'):
         self.cfg = cfg
         self.transform = transform
