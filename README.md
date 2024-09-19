@@ -63,7 +63,7 @@ bash train.sh
 ```
 
 You can set your training arguments at [config.py](./configs/config.py).<br>
-There is a setting for Rare Class Sampling(RCS). It is a setting for long-talied class motivated from [DAFormer](https://github.com/lhoyer/DAFormer)
+There is a setting for Rare Class Sampling(RCS). It is a setting for long-talied classification motivated from [DAFormer](https://github.com/lhoyer/DAFormer).<br>
 This will sample the rare class more often during the iteration. However it has a risk of model to not see some classes.
 It is more suitable for **multi-class classifiaction**.
 
