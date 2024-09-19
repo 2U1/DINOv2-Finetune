@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # 기본 변수 설정
-MODEL_PATH="/home/workspace/dinov2-ft/output/0906_CBCELoss/best_checkpoint-79886" 
-DATA_PATH="/home/workspace/reid/test"
-BATCH_SIZE=1024 
+MODEL_PATH="/path/to/your/checkpoint/directory" 
+DATA_PATH="/path/to/your/data/directory"
+BATCH_SIZE=128 
 TOP_K=5
 
 # Python 스크립트 실행
