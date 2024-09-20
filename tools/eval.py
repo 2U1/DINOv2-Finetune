@@ -33,15 +33,17 @@ def evaluate(model, dataloader, device, k=5):
     return accuracy, top_k_accuracy
 
 def load_model_checkpoint(model_path):
-    pth_files = [f for f in os.listdir(model_path) if f.endswith('.pth')]
-
-    if not pth_files:
-        raise FileNotFoundError("No model checkpoint found in the given directory")
     
-    checkpoint_path = os.path.join(model_path, pth_files[0])
-    checkpoint = torch.load(checkpoint_path)
+    try:
+        checkpoint_path = os.path.join(model_path, 'dino_model.bin')
+        checkpoint = torch.load(checkpoint_path)
+        checkpoint = remove_module_from_state_dict(checkpoint)
 
-    return checkpoint
+        return checkpoint
+
+    except FileNotFoundError:
+        print(f"Model checkpoint not found at {model_path}")
+        exit()
 
 def remove_module_from_state_dict(state_dict):
     new_state_dict = {}
@@ -60,20 +62,20 @@ def main(args):
     top_k = args.top_k
 
     cfg = json.load(open(os.path.join(model_path, 'config.json')))
-    checkpoint = load_model_checkpoint(model_path)
 
     transform = ImageTransform(cfg['resize'], cfg['mean'], cfg['std'])
 
     # Remapping labels for evaluation dataset
-    class_to_idx = checkpoint['class_to_idx']
+    class_to_idx = json.load(open(os.path.join(model_path, 'class_to_idx.json')))
 
     model_cfg = cfg['model']
     
     model = Classifier(num_classes=model_cfg['num_classes'], backbone=model_cfg['backbone'], head=model_cfg['head']).to(device)
-    state_dict = remove_module_from_state_dict(checkpoint['model_state_dict'])
+    state_dict = load_model_checkpoint(model_path)
     model.load_state_dict(state_dict)
+    
 
-    del checkpoint, state_dict
+    del state_dict
 
     if args.use_dp and torch.cuda.device_count() > 1:
         model = torch.nn.DataParallel(model)
@@ -86,7 +88,7 @@ def main(args):
     accuracy, top_k_accuracy = evaluate(model, eval_dataloader, device, k=top_k)
     
     print(f"Final Evaluation Accuracy: {accuracy:.2f}%")
-    print(f"Final Top-5 Accuracy: {top_k_accuracy:.2f}%")
+    print(f"Final Top-{top_k} Accuracy: {top_k_accuracy:.2f}%")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Evaluate a trained model on a dataset")

@@ -1,6 +1,6 @@
 class Config:
     def __init__(self):
-        self.batch_per_gpu = 16
+        self.batch_per_gpu = 32
         self.num_gpu = 1
         self.resize = (224,224)
         self.mean = [0.485, 0.456, 0.406]
@@ -21,10 +21,10 @@ class Config:
                 'warmup_ratio': 0.03
             }
         }
-        self.do_eval = False
+        self.do_eval = True
         # self.eval_step = 2000 # This is only used when the training is iteration based (not epoch based)
         # self.iterations = "8k"  # This is only used when the training is iteration based (not epoch based)
-        self.num_train_epoch = 100
+        self.num_train_epoch = 3
         self.model = {
             'backbone': 'dinov2_l', # 'dinov2_s', 'dinov2_b', 'dinov2_l', 'dinov2_g', 'siglip_384'
             'head': 'single', # 'single', 'mlp'
@@ -39,7 +39,7 @@ class Config:
         }
         self.dataset = {
             'train': {
-                'data_root': '/path/to/your/dataset',
+                'data_root': '/path/to/train',
                 # The rare_class_sampling is used when it is iteration based.
                 # This makes the training to sample the rare classes more frequently. However, it has a risk of not seeing the all data.
                 # rare_class_sampling might be useful when your class is multi-label classification.
@@ -48,7 +48,7 @@ class Config:
                 # }
             },
             'eval': {
-                'data_root': '/path/to/your/dataset',
+                'data_root': '/to/to/eval',
             }
         }
         self.max_checkpoint = 1

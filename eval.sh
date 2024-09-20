@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # 기본 변수 설정
-MODEL_PATH="/path/to/your/checkpoint/directory" 
-DATA_PATH="/path/to/your/data/directory"
+MODEL_PATH="/path/to/checkpoint" 
+DATA_PATH="/path/to/data"
 BATCH_SIZE=128 
-TOP_K=5
+TOP_K=3
 
 # Python 스크립트 실행
 python -m tools.eval \

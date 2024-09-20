@@ -15,15 +15,18 @@ def save_final_model(model, optimizer, scheduler, save_dir, cfg, class_to_idx):
     final_dir = os.path.join(save_dir, "final_model")
     os.makedirs(final_dir, exist_ok=True)
 
-    checkpoint = {
-        'model_state_dict': model.state_dict(),
+    training_args = {
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
         'class_to_idx': class_to_idx
     }
 
-    final_model_path = os.path.join(final_dir, "final_model.pth")
-    torch.save(checkpoint, final_model_path)
+    final_model_path = os.path.join(final_dir, "dino_model.bin")
+    torch.save(model.state_dict(), final_model_path)
+    torch.save(training_args, os.path.join(final_dir, "training_args.bin"))
+
+    with open(os.path.join(final_dir, "class_to_idx.json"), 'w') as f:
+        json.dump(class_to_idx, f, indent=4)
 
     config_path = os.path.join(final_dir, "config.json")
     with open(config_path, 'w') as f:
@@ -34,17 +37,19 @@ def save_checkpoint(model, optimizer, scheduler, epoch, iteration, save_dir, cfg
     checkpoint_dir = os.path.join(save_dir, f"checkpoint-{iteration}")
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    checkpoint = {
-        'model_state_dict': model.state_dict(),
+    training_args = {
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
         'epoch': epoch,
-        'iteration': iteration,
-        'class_to_idx': class_to_idx
+        'iteration': iteration
     }
 
-    checkpoint_path = os.path.join(checkpoint_dir, "checkpoint.pth")
-    torch.save(checkpoint, checkpoint_path)
+    checkpoint_path = os.path.join(checkpoint_dir, "dino_model.bin")
+    torch.save(model.state_dict(), checkpoint_path)
+    torch.save(training_args, os.path.join(checkpoint_dir, "training_args.bin"))
+
+    with open(os.path.join(checkpoint_dir, "class_to_idx.json"), 'w') as f:
+        json.dump(class_to_idx, f, indent=4)
 
     config_path = os.path.join(checkpoint_dir, "config.json")
     with open(config_path, 'w') as f:
@@ -53,8 +58,12 @@ def save_checkpoint(model, optimizer, scheduler, epoch, iteration, save_dir, cfg
     if is_best:
         best_checkpoint_dir = os.path.join(save_dir, f"best_checkpoint-{iteration}")
         os.makedirs(best_checkpoint_dir, exist_ok=True)
-        best_checkpoint_path = os.path.join(best_checkpoint_dir, "best_checkpoint.pth")
-        torch.save(checkpoint, best_checkpoint_path)
+        best_checkpoint_path = os.path.join(best_checkpoint_dir, "dino_model.bin")
+        torch.save(model.state_dict(), best_checkpoint_path)
+        torch.save(training_args, os.path.join(best_checkpoint_dir, "training_args.bin"))
+
+        with open(os.path.join(best_checkpoint_dir, "class_to_idx.json"), 'w') as f:
+            json.dump(class_to_idx, f, indent=4)
 
         best_config_path = os.path.join(best_checkpoint_dir, "config.json")
         with open(best_config_path, 'w') as f:
